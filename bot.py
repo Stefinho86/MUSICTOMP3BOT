@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import sqlite3
+import glob
 from uuid import uuid4
 from dotenv import load_dotenv
 from telegram import (
@@ -86,10 +87,11 @@ async def download_mp3_async(video_id):
 
 def download_mp3(video_id):
     url = f"https://www.youtube.com/watch?v={video_id}"
-    filename = f"{uuid4()}.mp3"
+    unique_id = str(uuid4())
+    filename = f"{unique_id}.mp3"
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': filename,
+        'outtmpl': f'{unique_id}.%(ext)s',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -97,10 +99,19 @@ def download_mp3(video_id):
         }],
         'noplaylist': True,
         'quiet': True,
+        'merge_output_format': 'mp3',
     }
     with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-    return filename
+    # Cerca il file mp3 creato
+    mp3_files = glob.glob(f"{unique_id}*.mp3")
+    if mp3_files:
+        logger.info(f"File mp3 trovato: {mp3_files[0]}")
+        return mp3_files[0]
+    else:
+        logger.error("Nessun file mp3 trovato dopo il download!")
+        logger.error(f"Files in directory: {os.listdir('.')}")
+        raise FileNotFoundError("Nessun file mp3 trovato dopo il download!")
 
 # --- Limiti utente
 user_jobs = {}
@@ -219,10 +230,15 @@ async def paginate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await query.edit_message_text("Scarico la canzone, attendi...")
             filename = await download_mp3_async(video_id)
-            with open(filename, "rb") as f:
-                await query.message.reply_audio(f)
-            os.remove(filename)
-            await query.message.reply_text("Scaricata e inviata!")
+            logger.info(f"Provo a inviare il file: {filename}")
+            if not os.path.exists(filename):
+                logger.error(f"File non trovato dopo il download: {filename}")
+                await query.message.reply_text("Errore: file mp3 non trovato dopo il download.")
+            else:
+                with open(filename, "rb") as f:
+                    await query.message.reply_audio(f)
+                os.remove(filename)
+                await query.message.reply_text("Scaricata e inviata!")
         except Exception as e:
             logger.error(f"Errore download: {e}")
             await query.message.reply_text("Errore nel download. Riprova più tardi.")
