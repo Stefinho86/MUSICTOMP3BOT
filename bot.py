@@ -3,6 +3,7 @@ import asyncio
 import logging
 import sqlite3
 import glob
+import re
 from uuid import uuid4
 from dotenv import load_dotenv
 from telegram import (
@@ -26,7 +27,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Stati conversazione
-MENU, SEARCH, CHOOSE, PAGINATE = range(4)
+MENU, SEARCH, PAGINATE = range(3)
 PAGE_SIZE = 5
 MAX_HISTORY = 10
 USER_LIMIT = 3  # richieste contemporanee per utente
@@ -64,6 +65,11 @@ def get_history(user_id):
     conn.close()
     return results
 
+# --- Utilità per pulire il nome del file
+def safe_filename(s):
+    # Rimuove caratteri non validi per i nomi file
+    return re.sub(r'[\\/*?:"<>|]', '', s).strip()
+
 # --- Ricerca su YouTube
 def search_youtube(query, page_token=None):
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
@@ -74,21 +80,22 @@ def search_youtube(query, page_token=None):
     results = []
     for item in res['items']:
         title = item['snippet']['title']
+        channel = item['snippet'].get('channelTitle', 'Sconosciuto')
         video_id = item['id']['videoId']
-        results.append({'title': title, 'video_id': video_id})
+        results.append({'title': title, 'video_id': video_id, 'channel': channel})
     next_token = res.get('nextPageToken')
     prev_token = res.get('prevPageToken')
     return results, next_token, prev_token
 
 # --- Scarica audio (yt-dlp)
-async def download_mp3_async(video_id):
+async def download_mp3_async(video_id, artist, title):
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, download_mp3, video_id)
+    return await loop.run_in_executor(None, download_mp3, video_id, artist, title)
 
-def download_mp3(video_id):
+def download_mp3(video_id, artist, title):
     url = f"https://www.youtube.com/watch?v={video_id}"
     unique_id = str(uuid4())
-    filename = f"{unique_id}.mp3"
+    temp_filename = f"{unique_id}.mp3"
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': f'{unique_id}.%(ext)s',
@@ -103,15 +110,16 @@ def download_mp3(video_id):
     }
     with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-    # Cerca il file mp3 creato
     mp3_files = glob.glob(f"{unique_id}*.mp3")
-    if mp3_files:
-        logger.info(f"File mp3 trovato: {mp3_files[0]}")
-        return mp3_files[0]
-    else:
+    if not mp3_files:
         logger.error("Nessun file mp3 trovato dopo il download!")
-        logger.error(f"Files in directory: {os.listdir('.')}")
         raise FileNotFoundError("Nessun file mp3 trovato dopo il download!")
+    # Costruisci il nuovo nome file
+    artist_clean = safe_filename(artist)
+    title_clean = safe_filename(title)
+    final_name = f"{artist_clean} - {title_clean}.mp3"
+    os.rename(mp3_files[0], final_name)
+    return final_name
 
 # --- Limiti utente
 user_jobs = {}
@@ -128,7 +136,10 @@ def end_job(user_id):
 # --- Comandi Bot
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    await manda_menu(update)
+    return MENU
+
+async def manda_menu(update):
     keyboard = [
         [KeyboardButton("🔍 Cerca per titolo")],
         [KeyboardButton("🎤 Cerca per artista")],
@@ -136,25 +147,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("🕑 Cronologia")],
         [KeyboardButton("❌ Esci")]
     ]
-    await update.message.reply_text(
-        "Benvenuto! Scegli una modalità di ricerca:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
-    return MENU
+    if hasattr(update, "message") and update.message:
+        await update.message.reply_text(
+            "Benvenuto! Scegli una modalità di ricerca:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+    elif hasattr(update, "callback_query") and update.callback_query:
+        await update.callback_query.message.reply_text(
+            "Menù principale:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
     if "titolo" in text:
         context.user_data['search_mode'] = "titolo"
-        await update.message.reply_text("Inserisci il titolo della canzone:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(
+            "Inserisci il titolo della canzone:",
+            reply_markup=ReplyKeyboardMarkup([["Annulla"]], resize_keyboard=True)
+        )
         return SEARCH
     elif "artista" in text:
         context.user_data['search_mode'] = "artista"
-        await update.message.reply_text("Inserisci il nome dell'artista:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(
+            "Inserisci il nome dell'artista:",
+            reply_markup=ReplyKeyboardMarkup([["Annulla"]], resize_keyboard=True)
+        )
         return SEARCH
     elif "album" in text:
         context.user_data['search_mode'] = "album"
-        await update.message.reply_text("Inserisci il nome dell'album:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(
+            "Inserisci il nome dell'album:",
+            reply_markup=ReplyKeyboardMarkup([["Annulla"]], resize_keyboard=True)
+        )
         return SEARCH
     elif "cronologia" in text:
         history = get_history(update.effective_user.id)
@@ -162,23 +187,35 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Nessuna cronologia trovata.")
         else:
             await update.message.reply_text("\n".join(f"- {h}" for h in history))
+        await manda_menu(update)
         return MENU
-    elif "esci" in text:
-        await update.message.reply_text("Bot terminato. Usa /start per ricominciare.", reply_markup=ReplyKeyboardRemove())
-        return ConversationHandler.END
+    elif "esci" in text or "annulla" in text or "/annulla" in text:
+        await update.message.reply_text(
+            "Conversazione annullata.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await manda_menu(update)
+        return MENU
     else:
         await update.message.reply_text("Scegli una delle opzioni dal menu.")
         return MENU
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
-    context.user_data['query'] = query
-    add_history(update.effective_user.id, query)
-    results, next_token, prev_token = search_youtube(query)
+    text = update.message.text.strip()
+    if text.lower() in ["annulla", "/annulla"]:
+        await update.message.reply_text(
+            "Operazione annullata.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await manda_menu(update)
+        return MENU
+    context.user_data['query'] = text
+    add_history(update.effective_user.id, text)
+    results, next_token, prev_token = search_youtube(text)
     if not results:
         await update.message.reply_text("Nessun risultato trovato.")
+        await manda_menu(update)
         return MENU
-    # Salva per paginazione
     context.user_data['results'] = results
     context.user_data['next_token'] = next_token
     context.user_data['prev_token'] = prev_token
@@ -188,7 +225,8 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_results(update, context, results, next_token, prev_token):
     keyboard = [
-        [InlineKeyboardButton(r['title'][:50], callback_data=f"dl_{r['video_id']}")] for r in results
+        [InlineKeyboardButton(f"{r['channel']} - {r['title']}"[:50], callback_data=f"dl_{i}")]
+        for i, r in enumerate(results)
     ]
     nav_buttons = []
     if prev_token:
@@ -197,7 +235,8 @@ async def show_results(update, context, results, next_token, prev_token):
         nav_buttons.append(InlineKeyboardButton("Avanti ➡️", callback_data="next"))
     if nav_buttons:
         keyboard.append(nav_buttons)
-    if update.message:
+    keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="annulla")])
+    if hasattr(update, "message") and update.message:
         await update.message.reply_text(
             "Risultati trovati:",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -221,7 +260,11 @@ async def paginate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_results(update, context, results, next_token, prev_token)
         return PAGINATE
     elif data.startswith("dl_"):
-        video_id = data[3:]
+        idx = int(data[3:])
+        result = context.user_data['results'][idx]
+        video_id = result['video_id']
+        artist = result['channel']
+        title = result['title']
         user_id = update.effective_user.id
         if not can_download(user_id):
             await query.edit_message_text("Stai già scaricando troppe canzoni in parallelo. Attendi...")
@@ -229,14 +272,13 @@ async def paginate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         start_job(user_id)
         try:
             await query.edit_message_text("Scarico la canzone, attendi...")
-            filename = await download_mp3_async(video_id)
-            logger.info(f"Provo a inviare il file: {filename}")
+            filename = await download_mp3_async(video_id, artist, title)
             if not os.path.exists(filename):
                 logger.error(f"File non trovato dopo il download: {filename}")
                 await query.message.reply_text("Errore: file mp3 non trovato dopo il download.")
             else:
                 with open(filename, "rb") as f:
-                    await query.message.reply_audio(f)
+                    await query.message.reply_audio(f, title=title, performer=artist)
                 os.remove(filename)
                 await query.message.reply_text("Scaricata e inviata!")
         except Exception as e:
@@ -244,18 +286,26 @@ async def paginate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Errore nel download. Riprova più tardi.")
         finally:
             end_job(user_id)
+        await manda_menu(query)
+        return MENU
+    elif data == "annulla":
+        await query.edit_message_text(
+            "Operazione annullata.",
+        )
+        await manda_menu(query)
         return MENU
     else:
         await query.edit_message_text("Comando sconosciuto.")
+        await manda_menu(query)
         return MENU
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Conversazione terminata.", reply_markup=ReplyKeyboardRemove())
-    return ConversationHandler.END
+async def annulla(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Conversazione annullata.", reply_markup=ReplyKeyboardRemove())
+    await manda_menu(update)
+    return MENU
 
 # --- Main
 def main():
-    # Inizializza database
     init_db()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -266,7 +316,10 @@ def main():
             SEARCH: [MessageHandler(filters.TEXT, search)],
             PAGINATE: [CallbackQueryHandler(paginate)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[
+            CommandHandler('annulla', annulla),
+            MessageHandler(filters.Regex("(?i)annulla"), annulla)
+        ]
     )
     app.add_handler(conv_handler)
     logger.info("Bot in esecuzione")
