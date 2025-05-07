@@ -28,7 +28,7 @@ SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
 
 def get_youtube_service():
-    return build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+    return build('youtube', 'v3', developerKey=YOUTUBE_API_KEY, cache_discovery=False)
 
 def get_spotify_client():
     return spotipy.Spotify(
@@ -123,20 +123,20 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             results = []
             for item in res.get("items", []):
                 # Solo risultati che hanno videoId
-                if item["id"].get("videoId"):
+                if "videoId" in item["id"]:
                     results.append({
                         "videoId": item["id"]["videoId"],
                         "title": item["snippet"]["title"],
                         "channel": item["snippet"]["channelTitle"]
                     })
             if not results:
-                await update.message.reply_text("❌ Nessun risultato trovato. Torno al menù principale.")
+                await update.message.reply_text("❌ Nessun risultato trovato su YouTube. Torno al menù principale.")
                 return await main_menu(update, context)
             context.user_data["yt_results"] = results
             context.user_data["yt_page"] = 0
             return await show_youtube_page(update, context)
-        except Exception:
-            logger.exception("Errore durante la ricerca YouTube")
+        except Exception as e:
+            logger.exception(f"Errore durante la ricerca YouTube: {e}")
             await update.message.reply_text("⚠️ Errore nella ricerca su YouTube (API).")
             return await main_menu(update, context)
 
@@ -158,15 +158,14 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             context.user_data["sp_page"] = 0
             return await show_spotify_page(update, context)
-        except Exception:
-            logger.exception("Errore durante la ricerca Spotify")
+        except Exception as e:
+            logger.exception(f"Errore durante la ricerca Spotify: {e}")
             await update.message.reply_text("⚠️ Errore nella ricerca su Spotify.")
             return await main_menu(update, context)
     else:
         await update.message.reply_text("❓ Sorgente sconosciuta. Torno al menù.")
         return await main_menu(update, context)
 
-# --- YouTube paginazione ---
 async def show_youtube_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     results = context.user_data["yt_results"]
     page = context.user_data.get("yt_page", 0)
@@ -199,7 +198,6 @@ async def show_youtube_page(update_or_query, context: ContextTypes.DEFAULT_TYPE)
         )
     return SHOW_RESULTS
 
-# --- Spotify paginazione ---
 async def show_spotify_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     results = context.user_data["sp_results"]
     page = context.user_data.get("sp_page", 0)
@@ -232,12 +230,10 @@ async def show_spotify_page(update_or_query, context: ContextTypes.DEFAULT_TYPE)
         )
     return SHOW_RESULTS
 
-# --- Callback risultati ---
 async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    # --- YouTube ---
     if data == "yt_prev":
         context.user_data["yt_page"] = max(0, context.user_data["yt_page"] - 1)
         return await show_youtube_page(update, context)
@@ -266,7 +262,6 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.exception("Errore scaricando da YouTube")
             await query.message.reply_text("⚠️ Errore durante il download o l'invio dell'mp3. Probabilmente ffmpeg manca nel container Railway.")
         return await main_menu(update, context)
-    # --- Spotify ---
     if data == "sp_prev":
         context.user_data["sp_page"] = max(0, context.user_data["sp_page"] - 1)
         return await show_spotify_page(update, context)
@@ -308,7 +303,6 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("Errore interno, torno al menù.")
     return await main_menu(update, context)
 
-# --- Download YouTube ---
 async def download_youtube_audio(url: str) -> str:
     temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
     os.close(temp_fd)
