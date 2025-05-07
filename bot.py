@@ -33,7 +33,7 @@ def cancel_markup():
     return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annulla", callback_data="cancel")]])
 
 def main_keyboard():
-    # Bottoni reply che compaiono SEMPRE nella barra della chat
+    # Bottoni reply che compaiono nella barra della chat
     return ReplyKeyboardMarkup([
         [KeyboardButton("/youtube"), KeyboardButton("/spotify")],
         [KeyboardButton("/annulla")]
@@ -55,13 +55,14 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     msg = "🎧 *Scegli la sorgente musicale:*"
+    # Solo un reply_markup per ogni messaggio!
     if hasattr(update, "callback_query") and update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
     elif hasattr(update, "message") and update.message:
-        await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown", reply_markup=main_keyboard())
+        await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
     else:
-        await update.effective_message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown", reply_markup=main_keyboard())
+        await update.effective_message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
     return CHOOSE_SOURCE
 
 async def choose_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -386,7 +387,6 @@ async def download_spotify_mp3(query, track_info):
     """
     Invece di fare scraping, fornisce direttamente il link di download da SpotifyMate.
     """
-    # Ottieni l'ID traccia Spotify e prepara il link
     track_id = track_info.get("id")
     if not track_id:
         await query.edit_message_text("❌ Errore: manca l'ID della canzone Spotify.")
