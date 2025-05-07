@@ -1,0 +1,4 @@
+python-telegram-bot==20.7
+yt-dlp
+google-api-python-client
+python-dotenv
