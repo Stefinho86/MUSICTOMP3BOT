@@ -67,10 +67,9 @@ def get_history(user_id):
 
 # --- Utilità per pulire il nome del file
 def safe_filename(s):
-    # Rimuove caratteri non validi per i nomi file
     return re.sub(r'[\\/*?:"<>|]', '', s).strip()
 
-# --- Ricerca su YouTube
+# --- Ricerca su YouTube (con paginazione)
 def search_youtube(query, page_token=None):
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
     req = youtube.search().list(
@@ -114,7 +113,6 @@ def download_mp3(video_id, artist, title):
     if not mp3_files:
         logger.error("Nessun file mp3 trovato dopo il download!")
         raise FileNotFoundError("Nessun file mp3 trovato dopo il download!")
-    # Costruisci il nuovo nome file
     artist_clean = safe_filename(artist)
     title_clean = safe_filename(title)
     final_name = f"{artist_clean} - {title_clean}.mp3"
@@ -141,15 +139,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def manda_menu(update):
     keyboard = [
-        [KeyboardButton("🔍 Cerca per titolo")],
-        [KeyboardButton("🎤 Cerca per artista")],
-        [KeyboardButton("💿 Cerca per album")],
+        [KeyboardButton("🔍 Cerca brano")],
         [KeyboardButton("🕑 Cronologia")],
         [KeyboardButton("❌ Esci")]
     ]
     if hasattr(update, "message") and update.message:
         await update.message.reply_text(
-            "Benvenuto! Scegli una modalità di ricerca:",
+            "Benvenuto! Scegli una modalità:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
     elif hasattr(update, "callback_query") and update.callback_query:
@@ -160,24 +156,10 @@ async def manda_menu(update):
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
-    if "titolo" in text:
+    if "cerca" in text:
         context.user_data['search_mode'] = "titolo"
         await update.message.reply_text(
-            "Inserisci il titolo della canzone:",
-            reply_markup=ReplyKeyboardMarkup([["Annulla"]], resize_keyboard=True)
-        )
-        return SEARCH
-    elif "artista" in text:
-        context.user_data['search_mode'] = "artista"
-        await update.message.reply_text(
-            "Inserisci il nome dell'artista:",
-            reply_markup=ReplyKeyboardMarkup([["Annulla"]], resize_keyboard=True)
-        )
-        return SEARCH
-    elif "album" in text:
-        context.user_data['search_mode'] = "album"
-        await update.message.reply_text(
-            "Inserisci il nome dell'album:",
+            "Inserisci il titolo del brano da cercare:",
             reply_markup=ReplyKeyboardMarkup([["Annulla"]], resize_keyboard=True)
         )
         return SEARCH
@@ -224,10 +206,19 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PAGINATE
 
 async def show_results(update, context, results, next_token, prev_token):
+    # Mostra elenco dettagliato nel messaggio
+    msg = ""
+    for idx, r in enumerate(results, start=1):
+        msg += f"*{idx}.* {r['title']}\n   _Canale:_ `{r['channel']}`\n\n"
+    msg += "Scegli quale scaricare dai pulsanti qui sotto."
+
+    # Pulsanti: uno per ogni risultato
     keyboard = [
-        [InlineKeyboardButton(f"{r['channel']} - {r['title']}"[:50], callback_data=f"dl_{i}")]
-        for i, r in enumerate(results)
+        [
+            InlineKeyboardButton(f"Scarica {i+1}", callback_data=f"dl_{i}")
+        ] for i in range(len(results))
     ]
+    # Navigazione
     nav_buttons = []
     if prev_token:
         nav_buttons.append(InlineKeyboardButton("⬅️ Indietro", callback_data="prev"))
@@ -236,14 +227,18 @@ async def show_results(update, context, results, next_token, prev_token):
     if nav_buttons:
         keyboard.append(nav_buttons)
     keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="annulla")])
+
     if hasattr(update, "message") and update.message:
         await update.message.reply_text(
-            "Risultati trovati:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            msg,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
         )
     else:
-        await update.callback_query.edit_message_reply_markup(
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        await update.callback_query.edit_message_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
         )
 
 async def paginate(update: Update, context: ContextTypes.DEFAULT_TYPE):
