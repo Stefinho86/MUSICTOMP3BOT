@@ -1,5 +1,7 @@
 import os
 import logging
+import tempfile
+import requests
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 )
@@ -11,14 +13,14 @@ from dotenv import load_dotenv
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 from youtubesearchpython import VideosSearch
+import yt_dlp
+from bs4 import BeautifulSoup
 
 load_dotenv()
 
-# Logging
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# States
 MENU, CHOOSE_SOURCE, CHOOSE_TYPE, ENTER_QUERY, SHOW_RESULTS = range(5)
 
 def get_spotify_client():
@@ -33,7 +35,6 @@ def cancel_markup():
     return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annulla", callback_data="cancel")]])
 
 def main_keyboard():
-    # Bottoni reply che compaiono nella barra della chat
     return ReplyKeyboardMarkup([
         [KeyboardButton("/youtube"), KeyboardButton("/spotify")],
         [KeyboardButton("/annulla")]
@@ -55,7 +56,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     msg = "🎧 *Scegli la sorgente musicale:*"
-    # Solo un reply_markup per ogni messaggio!
     if hasattr(update, "callback_query") and update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
@@ -116,7 +116,6 @@ async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    # Comandi barra chat
     if text.lower() in ["/annulla", "annulla"]:
         return await main_menu(update, context)
     if text.lower() == "/youtube":
@@ -149,7 +148,6 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     source = context.user_data.get("source")
     if source == "youtube":
-        # Cerca su YouTube (15 risultati)
         try:
             videos_search = VideosSearch(text, limit=15)
             results = videos_search.result()["result"]
@@ -164,17 +162,16 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
             await update.message.reply_text(
-                "📺 *Scegli il risultato che vuoi scaricare:*",
+                "📺 *Scegli il risultato da scaricare come mp3:*",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
             return SHOW_RESULTS
-        except Exception as e:
+        except Exception:
             logger.exception("Errore durante la ricerca YouTube")
             await update.message.reply_text("⚠️ Errore nella ricerca su YouTube.")
             return await main_menu(update, context)
     elif source == "spotify":
-        # Cerca su Spotify in base a tipo
         try:
             sp = get_spotify_client()
             s_type = context.user_data.get("spotify_type", "track")
@@ -186,7 +183,8 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {
                         "id": t["id"],
                         "name": t["name"],
-                        "artists": ", ".join(a["name"] for a in t["artists"])
+                        "artists": ", ".join(a["name"] for a in t["artists"]),
+                        "url": t["external_urls"]["spotify"]
                     } for t in results
                 ]
                 keyboard = [
@@ -194,53 +192,20 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"{t['name']} - {t['artists']}", callback_data=f"sp_{i}"
                     )] for i, t in enumerate(context.user_data["sp_results"])
                 ]
-            elif s_type == "artist":
-                res = sp.search(text, type="artist", limit=10)
-                results = res["artists"]["items"]
-                context.user_data["sp_results"] = [
-                    {"id": a["id"], "name": a["name"]} for a in results
-                ]
-                keyboard = [
-                    [InlineKeyboardButton(
-                        f"{a['name']}", callback_data=f"sp_artist_{i}"
-                    )] for i, a in enumerate(context.user_data["sp_results"])
-                ]
-            elif s_type == "album":
-                res = sp.search(text, type="album", limit=10)
-                results = res["albums"]["items"]
-                context.user_data["sp_results"] = [
-                    {"id": al["id"], "name": al["name"], "artists": ", ".join(a["name"] for a in al["artists"])} for al in results
-                ]
-                keyboard = [
-                    [InlineKeyboardButton(
-                        f"{al['name']} - {al['artists']}", callback_data=f"sp_album_{i}"
-                    )] for i, al in enumerate(context.user_data["sp_results"])
-                ]
-            elif s_type == "playlist":
-                res = sp.search(text, type="playlist", limit=10)
-                results = res["playlists"]["items"]
-                context.user_data["sp_results"] = [
-                    {"id": pl["id"], "name": pl["name"], "owner": pl["owner"]["display_name"]} for pl in results
-                ]
-                keyboard = [
-                    [InlineKeyboardButton(
-                        f"{pl['name']} (di {pl['owner']})", callback_data=f"sp_playlist_{i}"
-                    )] for i, pl in enumerate(context.user_data["sp_results"])
-                ]
             else:
-                await update.message.reply_text("Tipo di ricerca non supportato.")
+                await update.message.reply_text("Solo la ricerca 'Canzone' Spotify è supportata per il download diretto mp3.")
                 return await main_menu(update, context)
             if not keyboard:
                 await update.message.reply_text("❌ Nessun risultato trovato. Torno al menù principale.")
                 return await main_menu(update, context)
             keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
             await update.message.reply_text(
-                "🟢 *Scegli il risultato Spotify:*",
+                "🟢 *Scegli la canzone Spotify da scaricare come mp3:*",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
             return SHOW_RESULTS
-        except Exception as e:
+        except Exception:
             logger.exception("Errore durante la ricerca Spotify")
             await update.message.reply_text("⚠️ Errore nella ricerca su Spotify.")
             return await main_menu(update, context)
@@ -253,154 +218,99 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if query.data == "cancel":
         return await main_menu(update, context)
-    # YouTube
     if query.data.startswith("yt_"):
         idx = int(query.data.split("_")[1])
         result = context.user_data["yt_results"][idx]
         url = result["link"]
         title = result["title"]
-        # Invece di scaricare mp3 (problemi ffmpeg/yt-dlp su Railway), invia il link diretto YouTube!
-        await query.edit_message_text(
-            f"🎶 *Ecco il link YouTube:*\n[{title}]({url})\n\nPer scaricare l'mp3 puoi usare siti come [ytmp3.cc](https://ytmp3.cc/it/) o simili.",
-            parse_mode="Markdown"
-        )
-        await query.message.reply_text("✅ *Operazione completata.*", parse_mode="Markdown", reply_markup=main_keyboard())
+        performer = result["channel"]["name"]
+        try:
+            await query.edit_message_text(f"⬇️ Scaricamento in corso di: *{title}* ...", parse_mode="Markdown")
+            file_path = await download_youtube_audio(url)
+            await query.message.reply_audio(
+                audio=open(file_path, "rb"),
+                title=title,
+                performer=performer
+            )
+            os.remove(file_path)
+            await query.message.reply_text("✅ *Mp3 inviato. Torno al menù principale.*", parse_mode="Markdown", reply_markup=main_keyboard())
+        except Exception:
+            logger.exception("Errore scaricando da YouTube")
+            await query.message.reply_text("⚠️ Errore durante il download o l'invio dell'mp3.")
         return await main_menu(update, context)
-    # Spotify
     elif query.data.startswith("sp_"):
-        # Track, Artist, Album, Playlist
-        if "artist_" in query.data:
-            idx = int(query.data.split("_")[-1])
-            artist = context.user_data["sp_results"][idx]
-            # Cerca le 5 canzoni più famose dell'artista
-            try:
-                sp = get_spotify_client()
-                tracks = sp.artist_top_tracks(artist["id"], country="IT")["tracks"][:5]
-                if not tracks:
-                    await query.edit_message_text("❌ Nessuna canzone trovata per questo artista.")
-                    return await main_menu(update, context)
-                context.user_data["sp_results_artist_tracks"] = [
-                    {
-                        "id": t["id"],
-                        "name": t["name"],
-                        "artists": ", ".join(a["name"] for a in t["artists"])
-                    } for t in tracks
-                ]
-                keyboard = [
-                    [InlineKeyboardButton(
-                        f"{t['name']} - {t['artists']}", callback_data=f"sp_artist_track_{i}"
-                    )] for i, t in enumerate(context.user_data["sp_results_artist_tracks"])
-                ]
-                keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
-                await query.edit_message_text(
-                    f"Scegli una canzone di {artist['name']}:",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-                return SHOW_RESULTS
-            except Exception:
-                logger.exception("Errore ricerca canzoni artista")
-                await query.edit_message_text("⚠️ Errore nella ricerca delle canzoni dell'artista.")
+        idx = int(query.data.split("_")[-1])
+        track = context.user_data["sp_results"][idx]
+        spotify_url = track["url"]
+        title = track["name"]
+        artists = track["artists"]
+        try:
+            await query.edit_message_text(f"🔄 Scarico mp3 da SpotifyMate per *{title}*...", parse_mode="Markdown")
+            mp3_url = get_mp3_from_spotimate(spotify_url)
+            if not mp3_url:
+                await query.message.reply_text("❌ Non sono riuscito a recuperare l'mp3 da SpotifyMate.")
                 return await main_menu(update, context)
-        elif "album_" in query.data:
-            idx = int(query.data.split("_")[-1])
-            album = context.user_data["sp_results"][idx]
-            try:
-                sp = get_spotify_client()
-                tracks = sp.album_tracks(album["id"])["items"][:10]
-                if not tracks:
-                    await query.edit_message_text("❌ Nessuna canzone trovata in questo album.")
-                    return await main_menu(update, context)
-                context.user_data["sp_results_album_tracks"] = [
-                    {
-                        "id": t["id"],
-                        "name": t["name"],
-                        "artists": album["artists"]
-                    } for t in tracks
-                ]
-                keyboard = [
-                    [InlineKeyboardButton(
-                        f"{t['name']}", callback_data=f"sp_album_track_{i}"
-                    )] for i, t in enumerate(context.user_data["sp_results_album_tracks"])
-                ]
-                keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
-                await query.edit_message_text(
-                    f"Scegli una canzone dell'album {album['name']}:",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-                return SHOW_RESULTS
-            except Exception:
-                logger.exception("Errore ricerca canzoni album")
-                await query.edit_message_text("⚠️ Errore nella ricerca tracce dell'album.")
-                return await main_menu(update, context)
-        elif "playlist_" in query.data:
-            idx = int(query.data.split("_")[-1])
-            playlist = context.user_data["sp_results"][idx]
-            try:
-                sp = get_spotify_client()
-                tracks = sp.playlist_tracks(playlist["id"], limit=10)["items"]
-                if not tracks:
-                    await query.edit_message_text("❌ Nessuna canzone trovata in questa playlist.")
-                    return await main_menu(update, context)
-                context.user_data["sp_results_playlist_tracks"] = [
-                    {
-                        "id": t["track"]["id"],
-                        "name": t["track"]["name"],
-                        "artists": ", ".join(a["name"] for a in t["track"]["artists"])
-                    } for t in tracks
-                ]
-                keyboard = [
-                    [InlineKeyboardButton(
-                        f"{t['name']} - {t['artists']}", callback_data=f"sp_playlist_track_{i}"
-                    )] for i, t in enumerate(context.user_data["sp_results_playlist_tracks"])
-                ]
-                keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
-                await query.edit_message_text(
-                    f"Scegli una canzone dalla playlist {playlist['name']}:",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-                return SHOW_RESULTS
-            except Exception:
-                logger.exception("Errore ricerca canzoni playlist")
-                await query.edit_message_text("⚠️ Errore nella ricerca tracce della playlist.")
-                return await main_menu(update, context)
-        elif "artist_track_" in query.data:
-            idx = int(query.data.split("_")[-1])
-            track = context.user_data["sp_results_artist_tracks"][idx]
-            return await download_spotify_mp3(query, track)
-        elif "album_track_" in query.data:
-            idx = int(query.data.split("_")[-1])
-            track = context.user_data["sp_results_album_tracks"][idx]
-            return await download_spotify_mp3(query, track)
-        elif "playlist_track_" in query.data:
-            idx = int(query.data.split("_")[-1])
-            track = context.user_data["sp_results_playlist_tracks"][idx]
-            return await download_spotify_mp3(query, track)
-        else: # sp_X (track)
-            idx = int(query.data.split("_")[-1])
-            track = context.user_data["sp_results"][idx]
-            return await download_spotify_mp3(query, track)
+            temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
+            os.close(temp_fd)
+            r = requests.get(mp3_url, stream=True)
+            with open(temp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            await query.message.reply_audio(
+                audio=open(temp_path, "rb"),
+                title=title,
+                performer=artists
+            )
+            os.remove(temp_path)
+            await query.message.reply_text("✅ *Mp3 inviato da SpotifyMate. Torno al menù principale.*", parse_mode="Markdown", reply_markup=main_keyboard())
+        except Exception:
+            logger.exception("Errore scaricando da SpotifyMate")
+            await query.message.reply_text("⚠️ Errore durante il download o l'invio dell'mp3 da SpotifyMate.")
+        return await main_menu(update, context)
     else:
         await query.edit_message_text("Errore interno, torno al menù.")
         return await main_menu(update, context)
 
-async def download_spotify_mp3(query, track_info):
-    """
-    Invece di fare scraping, fornisce direttamente il link di download da SpotifyMate.
-    """
-    track_id = track_info.get("id")
-    if not track_id:
-        await query.edit_message_text("❌ Errore: manca l'ID della canzone Spotify.")
-        return await main_menu(query, query._application)
-    spotify_url = f"https://open.spotify.com/track/{track_id}"
-    spotimate_url = f"https://spotimate.io/it?url={spotify_url}"
-    await query.edit_message_text(
-        f"🎶 *Scarica l’mp3 di questa traccia Spotify gratis usando [SpotifyMate]({spotimate_url})!* \n\n"
-        f"Oppure copia il link qui: `{spotify_url}` e incollalo su [SpotifyMate](https://spotimate.io/it).\n\n"
-        "✅ *Operazione completata*.",
-        parse_mode="Markdown", disable_web_page_preview=True
-    )
-    await query.message.reply_text("Torna al menù principale 👇", reply_markup=main_keyboard())
-    return await main_menu(query, query._application)
+async def download_youtube_audio(url: str) -> str:
+    temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
+    os.close(temp_fd)
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': temp_path,
+        'quiet': True,
+        'noplaylist': True,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192'
+        }],
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    return temp_path
+
+def get_mp3_from_spotimate(spotify_url):
+    session = requests.Session()
+    # Ottieni la pagina di Spotimate per il link Spotify
+    main_url = "https://spotimate.io/it"
+    try:
+        resp = session.post(
+            main_url,
+            data={"url": spotify_url},
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # Cerca link mp3 diretto: <a href="..." download>Download</a>
+        download_btn = soup.find("a", attrs={"download": True})
+        if download_btn and download_btn.get("href", "").endswith(".mp3"):
+            return download_btn.get("href")
+        # In alcuni casi c'è anche un bottone secondario
+        for a in soup.find_all("a"):
+            if a.get("href", "").endswith(".mp3"):
+                return a.get("href")
+    except Exception as e:
+        logger.exception("Errore nell'accesso a SpotifyMate")
+    return None
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await main_menu(update, context)
