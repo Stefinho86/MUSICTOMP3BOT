@@ -1,366 +1,329 @@
 import os
+import asyncio
 import logging
-import tempfile
-import requests
+import sqlite3
+import glob
+import re
+from uuid import uuid4
+from dotenv import load_dotenv
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 )
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ConversationHandler, MessageHandler, ContextTypes, filters
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ConversationHandler, ContextTypes
 )
-from dotenv import load_dotenv
+from yt_dlp import YoutubeDL
 from googleapiclient.discovery import build
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
-import yt_dlp
-from bs4 import BeautifulSoup
 
+# --- Carica variabili ambiente
 load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+# --- Logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MENU, CHOOSE_SOURCE, ENTER_QUERY, SHOW_RESULTS = range(4)
+# --- Stati conversazione
+MENU, SEARCH, PAGINATE = range(3)
+PAGE_SIZE = 5
+MAX_HISTORY = 10
+USER_LIMIT = 3  # richieste contemporanee per utente
 
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
-SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
-
-def get_youtube_service():
-    return build('youtube', 'v3', developerKey=YOUTUBE_API_KEY, cache_discovery=False)
-
-def get_spotify_client():
-    return spotipy.Spotify(
-        auth_manager=SpotifyClientCredentials(
-            client_id=SPOTIFY_CLIENT_ID,
-            client_secret=SPOTIFY_CLIENT_SECRET
+# --- SQLite setup
+DB_FILE = "database.db"
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS history (
+            user_id INTEGER,
+            search TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
+    """)
+    conn.commit()
+    conn.close()
+
+def add_history(user_id, search):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO history (user_id, search) VALUES (?, ?)", (user_id, search))
+    conn.commit()
+    conn.close()
+
+def get_history(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        "SELECT search FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+        (user_id, MAX_HISTORY)
     )
+    results = [row[0] for row in c.fetchall()]
+    conn.close()
+    return results
 
-def main_keyboard():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("/youtube"), KeyboardButton("/spotify")],
-        [KeyboardButton("/annulla")]
-    ], resize_keyboard=True)
+# --- Utilità per pulire il nome del file
+def safe_filename(s):
+    # Rimuove caratteri non validi per i nomi file
+    return re.sub(r'[\\/*?:"<>|]', '', s).strip()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎧 Scegli una sorgente musicale oppure usa i comandi qui sotto.",
-        parse_mode="Markdown", reply_markup=main_keyboard()
+# --- Ricerca su YouTube
+def search_youtube(query, page_token=None):
+    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+    req = youtube.search().list(
+        q=query, part='snippet', type='video', maxResults=PAGE_SIZE, pageToken=page_token
     )
-    return await main_menu(update, context)
+    res = req.execute()
+    results = []
+    for item in res['items']:
+        title = item['snippet']['title']
+        channel = item['snippet'].get('channelTitle', 'Sconosciuto')
+        video_id = item['id']['videoId']
+        results.append({'title': title, 'video_id': video_id, 'channel': channel})
+    next_token = res.get('nextPageToken')
+    prev_token = res.get('prevPageToken')
+    return results, next_token, prev_token
 
-async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [
-            InlineKeyboardButton("🎵 Cerca su YouTube", callback_data="search_youtube"),
-            InlineKeyboardButton("🟢 Cerca su Spotify", callback_data="search_spotify"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    msg = "🎧 *Scegli la sorgente musicale:*"
-    if hasattr(update, "callback_query") and update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
-    elif hasattr(update, "message") and update.message:
-        await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
-    return CHOOSE_SOURCE
+# --- Scarica audio (yt-dlp)
+async def download_mp3_async(video_id, artist, title):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, download_mp3, video_id, artist, title)
 
-async def choose_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == "search_youtube":
-        context.user_data.clear()
-        context.user_data["source"] = "youtube"
-        await query.edit_message_text(
-            "🔍 Invia il titolo della canzone da cercare su YouTube.",
-            parse_mode="Markdown"
-        )
-        return ENTER_QUERY
-    elif query.data == "search_spotify":
-        context.user_data.clear()
-        context.user_data["source"] = "spotify"
-        await query.edit_message_text(
-            "🔍 Invia il titolo della canzone da cercare su Spotify.",
-            parse_mode="Markdown"
-        )
-        return ENTER_QUERY
-
-async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text.lower() in ["/annulla", "annulla"]:
-        return await main_menu(update, context)
-    if text.lower() == "/youtube":
-        context.user_data.clear()
-        context.user_data["source"] = "youtube"
-        await update.message.reply_text(
-            "🔍 Invia il titolo della canzone da cercare su YouTube.",
-            parse_mode="Markdown"
-        )
-        return ENTER_QUERY
-    if text.lower() == "/spotify":
-        context.user_data.clear()
-        context.user_data["source"] = "spotify"
-        await update.message.reply_text(
-            "🔍 Invia il titolo della canzone da cercare su Spotify.",
-            parse_mode="Markdown"
-        )
-        return ENTER_QUERY
-
-    source = context.user_data.get("source")
-
-    if source == "youtube":
-        try:
-            youtube = get_youtube_service()
-            req = youtube.search().list(
-                q=text,
-                part="snippet",
-                type="video",
-                maxResults=25
-            )
-            res = req.execute()
-            results = []
-            for item in res.get("items", []):
-                if "videoId" in item["id"]:
-                    results.append({
-                        "videoId": item["id"]["videoId"],
-                        "title": item["snippet"]["title"],
-                        "channel": item["snippet"]["channelTitle"]
-                    })
-            if not results:
-                await update.message.reply_text("❌ Nessun risultato trovato su YouTube.")
-                return await main_menu(update, context)
-            context.user_data["yt_results"] = results
-            context.user_data["yt_page"] = 0
-            return await show_youtube_page(update, context)
-        except Exception as e:
-            logger.exception(f"Errore durante la ricerca YouTube: {e}")
-            await update.message.reply_text("⚠️ Errore nella ricerca su YouTube.")
-            return await main_menu(update, context)
-
-    elif source == "spotify":
-        try:
-            sp = get_spotify_client()
-            res = sp.search(text, type="track", limit=25)
-            results = res["tracks"]["items"]
-            if not results:
-                await update.message.reply_text("❌ Nessun risultato trovato su Spotify.")
-                return await main_menu(update, context)
-            context.user_data["sp_results"] = [
-                {
-                    "id": t["id"],
-                    "name": t["name"],
-                    "artists": ", ".join(a["name"] for a in t["artists"]),
-                    "url": t["external_urls"]["spotify"]
-                } for t in results
-            ]
-            context.user_data["sp_page"] = 0
-            return await show_spotify_page(update, context)
-        except Exception as e:
-            logger.exception(f"Errore durante la ricerca Spotify: {e}")
-            await update.message.reply_text("⚠️ Errore nella ricerca su Spotify.")
-            return await main_menu(update, context)
-    else:
-        await update.message.reply_text("❓ Sorgente sconosciuta.")
-        return await main_menu(update, context)
-
-async def show_youtube_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
-    results = context.user_data["yt_results"]
-    page = context.user_data.get("yt_page", 0)
-    per_page = 5
-    total = len(results)
-    start = page * per_page
-    end = start + per_page
-    paginated = results[start:end]
-    keyboard = [
-        [InlineKeyboardButton(
-            f"{v['title']} - {v['channel']}", callback_data=f"yt_{start+i}"
-        )] for i, v in enumerate(paginated)
-    ]
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("⬅️ Indietro", callback_data="yt_prev"))
-    if end < total:
-        nav_row.append(InlineKeyboardButton("Avanti ➡️", callback_data="yt_next"))
-    if nav_row:
-        keyboard.append(nav_row)
-    keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
-    msg = f"📺 *Risultati YouTube ({start+1}-{min(end,total)}) su {total}:*"
-    if hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
-        await update_or_query.callback_query.edit_message_text(
-            msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
-        )
-    else:
-        await update_or_query.message.reply_text(
-            msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
-        )
-    return SHOW_RESULTS
-
-async def show_spotify_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
-    results = context.user_data["sp_results"]
-    page = context.user_data.get("sp_page", 0)
-    per_page = 5
-    total = len(results)
-    start = page * per_page
-    end = start + per_page
-    paginated = results[start:end]
-    keyboard = [
-        [InlineKeyboardButton(
-            f"{t['name']} - {t['artists']}", callback_data=f"sp_{start+i}"
-        )] for i, t in enumerate(paginated)
-    ]
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("⬅️ Indietro", callback_data="sp_prev"))
-    if end < total:
-        nav_row.append(InlineKeyboardButton("Avanti ➡️", callback_data="sp_next"))
-    if nav_row:
-        keyboard.append(nav_row)
-    keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
-    msg = f"🟢 *Risultati Spotify ({start+1}-{min(end,total)}) su {total}:*"
-    if hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
-        await update_or_query.callback_query.edit_message_text(
-            msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
-        )
-    else:
-        await update_or_query.message.reply_text(
-            msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
-        )
-    return SHOW_RESULTS
-
-async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data == "yt_prev":
-        context.user_data["yt_page"] = max(0, context.user_data["yt_page"] - 1)
-        return await show_youtube_page(update, context)
-    if data == "yt_next":
-        context.user_data["yt_page"] = context.user_data["yt_page"] + 1
-        return await show_youtube_page(update, context)
-    if data.startswith("yt_"):
-        idx = int(data.split("_")[1])
-        result = context.user_data["yt_results"][idx]
-        url = f"https://www.youtube.com/watch?v={result['videoId']}"
-        title = result["title"]
-        performer = result["channel"]
-        try:
-            await query.edit_message_text(f"⬇️ Scaricamento in corso di: *{title}* ...", parse_mode="Markdown")
-            file_path = await download_youtube_audio(url)
-            with open(file_path, "rb") as f:
-                await query.message.reply_audio(
-                    audio=f,
-                    title=title,
-                    performer=performer
-                )
-            os.remove(file_path)
-            await query.message.reply_text("✅ Mp3 inviato.", parse_mode="Markdown", reply_markup=main_keyboard())
-        except Exception:
-            logger.exception("Errore scaricando da YouTube")
-            await query.message.reply_text("⚠️ Errore durante il download o l'invio dell'mp3.")
-        return await main_menu(update, context)
-    if data == "sp_prev":
-        context.user_data["sp_page"] = max(0, context.user_data["sp_page"] - 1)
-        return await show_spotify_page(update, context)
-    if data == "sp_next":
-        context.user_data["sp_page"] = context.user_data["sp_page"] + 1
-        return await show_spotify_page(update, context)
-    if data.startswith("sp_"):
-        idx = int(data.split("_")[1])
-        track = context.user_data["sp_results"][idx]
-        spotify_url = track["url"]
-        title = track["name"]
-        artists = track["artists"]
-        try:
-            await query.edit_message_text(f"🔄 Scarico mp3 da SpotifyMate per *{title}*...", parse_mode="Markdown")
-            mp3_url = get_mp3_from_spotimate(spotify_url)
-            if not mp3_url:
-                await query.message.reply_text("❌ Non sono riuscito a recuperare l'mp3 da SpotifyMate.")
-                return await main_menu(update, context)
-            temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
-            os.close(temp_fd)
-            r = requests.get(mp3_url, stream=True)
-            with open(temp_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            with open(temp_path, "rb") as f:
-                await query.message.reply_audio(
-                    audio=f,
-                    title=title,
-                    performer=artists
-                )
-            os.remove(temp_path)
-            await query.message.reply_text("✅ Mp3 inviato da SpotifyMate.", parse_mode="Markdown", reply_markup=main_keyboard())
-        except Exception:
-            logger.exception("Errore scaricando da SpotifyMate")
-            await query.message.reply_text("⚠️ Errore durante il download o l'invio dell'mp3 da SpotifyMate.")
-        return await main_menu(update, context)
-    if data == "cancel":
-        return await main_menu(update, context)
-    await query.edit_message_text("Errore interno, torno al menù.")
-    return await main_menu(update, context)
-
-async def download_youtube_audio(url: str) -> str:
-    temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
-    os.close(temp_fd)
+def download_mp3(video_id, artist, title):
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    unique_id = str(uuid4())
+    temp_filename = f"{unique_id}.mp3"
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': temp_path,
-        'quiet': True,
-        'noplaylist': True,
+        'outtmpl': f'{unique_id}.%(ext)s',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
-            'preferredquality': '192'
+            'preferredquality': '192',
         }],
+        'noplaylist': True,
+        'quiet': True,
+        'merge_output_format': 'mp3',
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-    return temp_path
+    mp3_files = glob.glob(f"{unique_id}*.mp3")
+    if not mp3_files:
+        logger.error("Nessun file mp3 trovato dopo il download!")
+        raise FileNotFoundError("Nessun file mp3 trovato dopo il download!")
+    # Costruisci il nuovo nome file
+    artist_clean = safe_filename(artist)
+    title_clean = safe_filename(title)
+    final_name = f"{artist_clean} - {title_clean}.mp3"
+    os.rename(mp3_files[0], final_name)
+    return final_name
 
-def get_mp3_from_spotimate(spotify_url):
-    session = requests.Session()
-    main_url = "https://spotimate.io/it"
-    try:
-        resp = session.post(
-            main_url,
-            data={"url": spotify_url},
-            headers={"User-Agent": "Mozilla/5.0"}
+# --- Limiti utente
+user_jobs = {}
+
+def can_download(user_id):
+    return user_jobs.get(user_id, 0) < USER_LIMIT
+
+def start_job(user_id):
+    user_jobs[user_id] = user_jobs.get(user_id, 0) + 1
+
+def end_job(user_id):
+    user_jobs[user_id] = max(user_jobs.get(user_id, 1) - 1, 0)
+
+# --- Comandi Bot
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await manda_menu(update)
+    return MENU
+
+async def manda_menu(update):
+    keyboard = [
+        [KeyboardButton("🔍 Cerca per titolo")],
+        [KeyboardButton("🎤 Cerca per artista")],
+        [KeyboardButton("💿 Cerca per album")],
+        [KeyboardButton("🕑 Cronologia")],
+        [KeyboardButton("❌ Esci")]
+    ]
+    if hasattr(update, "message") and update.message:
+        await update.message.reply_text(
+            "Benvenuto! Scegli una modalità di ricerca:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
-        soup = BeautifulSoup(resp.text, "html.parser")
-        download_btn = soup.find("a", attrs={"download": True})
-        if download_btn and download_btn.get("href", "").endswith(".mp3"):
-            return download_btn.get("href")
-        for a in soup.find_all("a"):
-            if a.get("href", "").endswith(".mp3"):
-                return a.get("href")
-    except Exception as e:
-        logger.exception("Errore nell'accesso a SpotifyMate")
-    return None
+    elif hasattr(update, "callback_query") and update.callback_query:
+        await update.callback_query.message.reply_text(
+            "Menù principale:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await main_menu(update, context)
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.lower()
+    if "titolo" in text:
+        context.user_data['search_mode'] = "titolo"
+        await update.message.reply_text(
+            "Inserisci il titolo della canzone:",
+            reply_markup=ReplyKeyboardMarkup([["Annulla"]], resize_keyboard=True)
+        )
+        return SEARCH
+    elif "artista" in text:
+        context.user_data['search_mode'] = "artista"
+        await update.message.reply_text(
+            "Inserisci il nome dell'artista:",
+            reply_markup=ReplyKeyboardMarkup([["Annulla"]], resize_keyboard=True)
+        )
+        return SEARCH
+    elif "album" in text:
+        context.user_data['search_mode'] = "album"
+        await update.message.reply_text(
+            "Inserisci il nome dell'album:",
+            reply_markup=ReplyKeyboardMarkup([["Annulla"]], resize_keyboard=True)
+        )
+        return SEARCH
+    elif "cronologia" in text:
+        history = get_history(update.effective_user.id)
+        if not history:
+            await update.message.reply_text("Nessuna cronologia trovata.")
+        else:
+            await update.message.reply_text("\n".join(f"- {h}" for h in history))
+        await manda_menu(update)
+        return MENU
+    elif "esci" in text or "annulla" in text or "/annulla" in text:
+        await update.message.reply_text(
+            "Conversazione annullata.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await manda_menu(update)
+        return MENU
+    else:
+        await update.message.reply_text("Scegli una delle opzioni dal menu.")
+        return MENU
 
+async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text.lower() in ["annulla", "/annulla"]:
+        await update.message.reply_text(
+            "Operazione annullata.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await manda_menu(update)
+        return MENU
+    context.user_data['query'] = text
+    add_history(update.effective_user.id, text)
+    results, next_token, prev_token = search_youtube(text)
+    if not results:
+        await update.message.reply_text("Nessun risultato trovato.")
+        await manda_menu(update)
+        return MENU
+    context.user_data['results'] = results
+    context.user_data['next_token'] = next_token
+    context.user_data['prev_token'] = prev_token
+    context.user_data['page_token'] = None
+    await show_results(update, context, results, next_token, prev_token)
+    return PAGINATE
+
+async def show_results(update, context, results, next_token, prev_token):
+    keyboard = [
+        [InlineKeyboardButton(f"{r['channel']} - {r['title']}"[:50], callback_data=f"dl_{i}")]
+        for i, r in enumerate(results)
+    ]
+    nav_buttons = []
+    if prev_token:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Indietro", callback_data="prev"))
+    if next_token:
+        nav_buttons.append(InlineKeyboardButton("Avanti ➡️", callback_data="next"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="annulla")])
+    if hasattr(update, "message") and update.message:
+        await update.message.reply_text(
+            "Risultati trovati:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.callback_query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+async def paginate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == "next" or data == "prev":
+        token = context.user_data['next_token'] if data == "next" else context.user_data['prev_token']
+        results, next_token, prev_token = search_youtube(context.user_data['query'], page_token=token)
+        context.user_data['results'] = results
+        context.user_data['next_token'] = next_token
+        context.user_data['prev_token'] = prev_token
+        context.user_data['page_token'] = token
+        await show_results(update, context, results, next_token, prev_token)
+        return PAGINATE
+    elif data.startswith("dl_"):
+        idx = int(data[3:])
+        result = context.user_data['results'][idx]
+        video_id = result['video_id']
+        artist = result['channel']
+        title = result['title']
+        user_id = update.effective_user.id
+        if not can_download(user_id):
+            await query.edit_message_text("Stai già scaricando troppe canzoni in parallelo. Attendi...")
+            return PAGINATE
+        start_job(user_id)
+        try:
+            await query.edit_message_text("Scarico la canzone, attendi...")
+            filename = await download_mp3_async(video_id, artist, title)
+            if not os.path.exists(filename):
+                logger.error(f"File non trovato dopo il download: {filename}")
+                await query.message.reply_text("Errore: file mp3 non trovato dopo il download.")
+            else:
+                with open(filename, "rb") as f:
+                    await query.message.reply_audio(f, title=title, performer=artist)
+                os.remove(filename)
+                await query.message.reply_text("Scaricata e inviata!")
+        except Exception as e:
+            logger.error(f"Errore download: {e}")
+            await query.message.reply_text("Errore nel download. Riprova più tardi.")
+        finally:
+            end_job(user_id)
+        await manda_menu(query)
+        return MENU
+    elif data == "annulla":
+        await query.edit_message_text(
+            "Operazione annullata.",
+        )
+        await manda_menu(query)
+        return MENU
+    else:
+        await query.edit_message_text("Comando sconosciuto.")
+        await manda_menu(query)
+        return MENU
+
+async def annulla(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Conversazione annullata.", reply_markup=ReplyKeyboardRemove())
+    await manda_menu(update)
+    return MENU
+
+# --- Main
 def main():
-    token = os.environ["TELEGRAM_TOKEN"]
-    app = ApplicationBuilder().token(token).build()
+    init_db()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[CommandHandler('start', start)],
         states={
-            CHOOSE_SOURCE: [CallbackQueryHandler(choose_source)],
-            ENTER_QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_query)],
-            SHOW_RESULTS: [CallbackQueryHandler(show_results)],
+            MENU: [MessageHandler(filters.TEXT, menu)],
+            SEARCH: [MessageHandler(filters.TEXT, search)],
+            PAGINATE: [CallbackQueryHandler(paginate)],
         },
-        fallbacks=[CommandHandler("annulla", cancel)],
-        allow_reentry=True,
-        persistent=False,
+        fallbacks=[
+            CommandHandler('annulla', annulla),
+            MessageHandler(filters.Regex("(?i)annulla"), annulla)
+        ]
     )
     app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("youtube", lambda u, c: enter_query(u, c)))
-    app.add_handler(CommandHandler("spotify", lambda u, c: enter_query(u, c)))
-    app.add_handler(CommandHandler("annulla", cancel))
+    logger.info("Bot in esecuzione")
     app.run_polling()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

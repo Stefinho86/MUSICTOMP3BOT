@@ -1,7 +1,7 @@
-python-telegram-bot==20.8
+python-telegram-bot==20.7
 spotipy
 yt-dlp
-youtube-search-python
+youtubesearchpython
 google-api-python-client
 python-dotenv
 requests
