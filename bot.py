@@ -46,7 +46,7 @@ def main_keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎧 *Benvenuto! Scegli una sorgente musicale oppure usa i comandi qui sotto.*",
+        "🎧 Scegli una sorgente musicale oppure usa i comandi qui sotto.",
         parse_mode="Markdown", reply_markup=main_keyboard()
     )
     return await main_menu(update, context)
@@ -74,7 +74,7 @@ async def choose_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["source"] = "youtube"
         await query.edit_message_text(
-            "🔍 *Invia il titolo della canzone da cercare su YouTube.*\n\nPremi /annulla per tornare al menù.",
+            "🔍 Invia il titolo della canzone da cercare su YouTube.",
             parse_mode="Markdown"
         )
         return ENTER_QUERY
@@ -82,7 +82,7 @@ async def choose_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["source"] = "spotify"
         await query.edit_message_text(
-            "🔍 *Invia il titolo della canzone da cercare su Spotify.*\n\nPremi /annulla per tornare al menù.",
+            "🔍 Invia il titolo della canzone da cercare su Spotify.",
             parse_mode="Markdown"
         )
         return ENTER_QUERY
@@ -95,7 +95,7 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["source"] = "youtube"
         await update.message.reply_text(
-            "🔍 *Invia il titolo della canzone da cercare su YouTube.*\n\nPremi /annulla per tornare al menù.",
+            "🔍 Invia il titolo della canzone da cercare su YouTube.",
             parse_mode="Markdown"
         )
         return ENTER_QUERY
@@ -103,7 +103,7 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["source"] = "spotify"
         await update.message.reply_text(
-            "🔍 *Invia il titolo della canzone da cercare su Spotify.*\n\nPremi /annulla per tornare al menù.",
+            "🔍 Invia il titolo della canzone da cercare su Spotify.",
             parse_mode="Markdown"
         )
         return ENTER_QUERY
@@ -122,7 +122,6 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = req.execute()
             results = []
             for item in res.get("items", []):
-                # Solo risultati che hanno videoId
                 if "videoId" in item["id"]:
                     results.append({
                         "videoId": item["id"]["videoId"],
@@ -130,14 +129,14 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "channel": item["snippet"]["channelTitle"]
                     })
             if not results:
-                await update.message.reply_text("❌ Nessun risultato trovato su YouTube. Torno al menù principale.")
+                await update.message.reply_text("❌ Nessun risultato trovato su YouTube.")
                 return await main_menu(update, context)
             context.user_data["yt_results"] = results
             context.user_data["yt_page"] = 0
             return await show_youtube_page(update, context)
         except Exception as e:
             logger.exception(f"Errore durante la ricerca YouTube: {e}")
-            await update.message.reply_text("⚠️ Errore nella ricerca su YouTube (API).")
+            await update.message.reply_text("⚠️ Errore nella ricerca su YouTube.")
             return await main_menu(update, context)
 
     elif source == "spotify":
@@ -146,7 +145,7 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = sp.search(text, type="track", limit=25)
             results = res["tracks"]["items"]
             if not results:
-                await update.message.reply_text("❌ Nessun risultato trovato su Spotify. Torno al menù principale.")
+                await update.message.reply_text("❌ Nessun risultato trovato su Spotify.")
                 return await main_menu(update, context)
             context.user_data["sp_results"] = [
                 {
@@ -163,7 +162,7 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Errore nella ricerca su Spotify.")
             return await main_menu(update, context)
     else:
-        await update.message.reply_text("❓ Sorgente sconosciuta. Torno al menù.")
+        await update.message.reply_text("❓ Sorgente sconosciuta.")
         return await main_menu(update, context)
 
 async def show_youtube_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
@@ -243,8 +242,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("yt_"):
         idx = int(data.split("_")[1])
         result = context.user_data["yt_results"][idx]
-        video_id = result["videoId"]
-        url = f"https://www.youtube.com/watch?v={video_id}"
+        url = f"https://www.youtube.com/watch?v={result['videoId']}"
         title = result["title"]
         performer = result["channel"]
         try:
@@ -257,10 +255,10 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     performer=performer
                 )
             os.remove(file_path)
-            await query.message.reply_text("✅ *Mp3 inviato. Torno al menù principale.*", parse_mode="Markdown", reply_markup=main_keyboard())
+            await query.message.reply_text("✅ Mp3 inviato.", parse_mode="Markdown", reply_markup=main_keyboard())
         except Exception:
             logger.exception("Errore scaricando da YouTube")
-            await query.message.reply_text("⚠️ Errore durante il download o l'invio dell'mp3. Probabilmente ffmpeg manca nel container Railway.")
+            await query.message.reply_text("⚠️ Errore durante il download o l'invio dell'mp3.")
         return await main_menu(update, context)
     if data == "sp_prev":
         context.user_data["sp_page"] = max(0, context.user_data["sp_page"] - 1)
@@ -293,7 +291,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     performer=artists
                 )
             os.remove(temp_path)
-            await query.message.reply_text("✅ *Mp3 inviato da SpotifyMate. Torno al menù principale.*", parse_mode="Markdown", reply_markup=main_keyboard())
+            await query.message.reply_text("✅ Mp3 inviato da SpotifyMate.", parse_mode="Markdown", reply_markup=main_keyboard())
         except Exception:
             logger.exception("Errore scaricando da SpotifyMate")
             await query.message.reply_text("⚠️ Errore durante il download o l'invio dell'mp3 da SpotifyMate.")
