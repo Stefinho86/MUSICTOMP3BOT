@@ -1,1 +1,1 @@
-worker: python bot.py
+worker: bash install_ffmpeg.sh
