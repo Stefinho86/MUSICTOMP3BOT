@@ -202,20 +202,24 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['next_token'] = next_token
     context.user_data['prev_token'] = prev_token
     context.user_data['page_token'] = None
+    context.user_data['current_page'] = 0  # Resetta a pagina 0
     await show_results(update, context, results, next_token, prev_token)
     return PAGINATE
 
 async def show_results(update, context, results, next_token, prev_token):
-    # Mostra elenco dettagliato nel messaggio
+    # Calcola il numero iniziale del conteggio in base alla pagina attuale
+    current_page = context.user_data.get('current_page', 0)
+    start_number = current_page * PAGE_SIZE + 1
+
     msg = ""
-    for idx, r in enumerate(results, start=1):
+    for idx, r in enumerate(results, start=start_number):
         msg += f"*{idx}.* {r['title']}\n   _Canale:_ `{r['channel']}`\n\n"
     msg += "Scegli quale scaricare dai pulsanti qui sotto."
 
     # Pulsanti: uno per ogni risultato
     keyboard = [
         [
-            InlineKeyboardButton(f"Scarica {i+1}", callback_data=f"dl_{i}")
+            InlineKeyboardButton(f"Scarica {i+start_number}", callback_data=f"dl_{i}")
         ] for i in range(len(results))
     ]
     # Navigazione
@@ -246,12 +250,19 @@ async def paginate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     if data == "next" or data == "prev":
+        # Calcola pagina attuale
+        current_page = context.user_data.get('current_page', 0)
+        if data == "next":
+            current_page += 1
+        else:
+            current_page = max(0, current_page - 1)
         token = context.user_data['next_token'] if data == "next" else context.user_data['prev_token']
         results, next_token, prev_token = search_youtube(context.user_data['query'], page_token=token)
         context.user_data['results'] = results
         context.user_data['next_token'] = next_token
         context.user_data['prev_token'] = prev_token
         context.user_data['page_token'] = token
+        context.user_data['current_page'] = current_page  # Aggiorna pagina
         await show_results(update, context, results, next_token, prev_token)
         return PAGINATE
     elif data.startswith("dl_"):
