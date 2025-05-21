@@ -106,8 +106,17 @@ def download_mp3(video_id, artist, title):
         'noplaylist': True,
         'quiet': True,
         'merge_output_format': 'mp3',
-        'cookies': 'youtube_cookies.txt',  # << aggiungi questa riga!
+        'cookies': 'youtube_cookies.txt',
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
     }
+    print("DEBUG: File youtube_cookies.txt esiste?", os.path.exists("youtube_cookies.txt"))
+    try:
+        with open("youtube_cookies.txt", encoding="utf-8") as f:
+            print("DEBUG: Prime 3 righe cookie:")
+            for i in range(3):
+                print(f.readline().strip())
+    except Exception as e:
+        print("DEBUG: Errore apertura cookie:", e)
     with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
     mp3_files = glob.glob(f"{unique_id}*.mp3")
