@@ -106,6 +106,7 @@ def download_mp3(video_id, artist, title):
         'noplaylist': True,
         'quiet': True,
         'merge_output_format': 'mp3',
+        'cookies': 'youtube_cookies.txt',  # << aggiungi questa riga!
     }
     with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
